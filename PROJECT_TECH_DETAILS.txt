@@ -1,0 +1,58 @@
+TRANSOL VMS - PROJECT TECHNICAL DETAILS
+=======================================
+
+1. PROJECT OVERVIEW
+------------------
+Name: Transol Vendor Management System (VMS)
+Description: A Django-based web application for managing Invoices, Delivery Challans, Transport Charges, and consolidated PDF generation.
+
+2. CORE TECHNOLOGY STACK
+-----------------------
+- Programming Language: Python 3.9.6
+- Web Framework: Django (latest)
+- Database: SQLite (local file: db.sqlite3)
+- Frontend: HTML5, CSS3, Bootstrap 5.3.3, Font Awesome 6.5.1
+- PDF Engine: ReportLab (Primary) / WeasyPrint (Supported)
+- Data Processing: Pandas, Openpyxl (Excel Import/Export)
+- UI Components: Django-Crispy-Forms with Bootstrap 5 templates
+
+3. KEY DEPENDENCIES
+------------------
+- django: Core framework
+- reportlab: PDF document building
+- weasyprint: HTML-to-PDF conversion
+- num2words: Converting numerical amounts to Indian currency words
+- python-decouple: Environment variable management
+- pillow: Image handling for signatures and packed goods
+
+4. PROJECT STRUCTURE (Key Folders)
+---------------------------------
+- /transol: Django project configuration (settings, urls, asgi/wsgi)
+- /clientdoc: Main application logic (Models: Invoice, Buyer, Location; Views: PDF generation)
+- /media: Uploaded signatures, POs, and packed images
+- /static: Global CSS and custom assets
+- /Project guide: Documentation folder containing the Project Guide PDF
+
+5. RUNNING LOCALLY
+-----------------
+1. Environment Setup:
+   python3 -m venv venv
+   source venv/bin/activate
+
+2. Install Dependencies:
+   pip install -r requirements.txt
+
+3. Database Migrations:
+   python manage.py migrate
+
+4. Start Development Server:
+   python manage.py runserver
+
+6. REPOSITORY
+------------
+GitHub: https://github.com/saiands/transole.git
+
+7. MAINTAINER DETAILS
+--------------------
+Created/Modified: December 2024
+Target System: macOS/Linux/Windows
