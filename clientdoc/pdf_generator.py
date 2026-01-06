@@ -78,18 +78,32 @@ def create_footer_with_signature(company, notes=""):
     """
     
     # Signature Image logic
-    signature_img = ""
+    # Signature Image logic
+    signature_img = None
+    img_path = None
+    
+    # 1. Try Company Signature (Database)
     if hasattr(company, 'signature') and company.signature:
         try:
-            # We can use Platypus Image
             img_path = company.signature.path
-            # Scale image - max height 40px, width auto?
-            # ReportLab Image(path, width, height)
-            signature_img = Image(img_path, width=40*mm, height=15*mm)
-            signature_img.hAlign = 'RIGHT'
+        except Exception:
+            img_path = None
+            
+    # 2. Universal Fallback (Local File)
+    if not img_path or not os.path.exists(img_path):
+        fallback_path = os.path.join(os.path.dirname(__file__), 'signature.png')
+        if os.path.exists(fallback_path):
+            img_path = fallback_path
+
+    # 3. Create Image Object if path found
+    if img_path:
+        try:
+            # Check if file effectively exists before trying to open to avoid errors
+            if os.path.exists(img_path):
+                signature_img = Image(img_path, width=40*mm, height=15*mm)
+                signature_img.hAlign = 'RIGHT'
         except Exception as e:
             print(f"Error loading signature: {e}")
-            # Ensure signature_img is None or handled if error occurs
             pass
 
     auth_sig_text = "<br/>Authorised Signatory"
@@ -412,12 +426,27 @@ def generate_dc_pdf(invoice, dc, company_input):
     
     # Signature Image logic for DC
     signature_img = None
+    img_path = None
+    
+    # 1. Try Company Signature (Database)
     if hasattr(company, 'signature') and company.signature:
         try:
             img_path = company.signature.path
-            # Center the image in the signature block
-            signature_img = Image(img_path, width=40*mm, height=15*mm) 
-            signature_img.hAlign = 'CENTER'
+        except Exception:
+            img_path = None
+            
+    # 2. Universal Fallback (Local File)
+    if not img_path or not os.path.exists(img_path):
+        fallback_path = os.path.join(os.path.dirname(__file__), 'signature.png')
+        if os.path.exists(fallback_path):
+            img_path = fallback_path
+
+    if img_path:
+        try:
+            if os.path.exists(img_path):
+                # Center the image in the signature block
+                signature_img = Image(img_path, width=40*mm, height=15*mm) 
+                signature_img.hAlign = 'CENTER'
         except Exception:
             pass
 
