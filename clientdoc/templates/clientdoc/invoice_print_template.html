@@ -147,9 +147,6 @@
                                 {% if invoice.tally_invoice_number %}
                                 Tally Inv: {{ invoice.tally_invoice_number }}<br>
                                 {% endif %}
-                                {% if invoice.app_invoice_number %}
-                                App Inv: {{ invoice.app_invoice_number }}
-                                {% endif %}
                             </div>
                         </td>
                         <td>
@@ -237,7 +234,7 @@
                 <td class="text-center">{{ forloop.counter }}</td>
                 <td>
                     <div class="text-bold">{{ item.item.name }}</div>
-                    {% if item.item.description %}<div class="small-text">{{ item.item.description }}</div>{% endif %}
+                    <div class="small-text">{{ item.description|default:item.item.description|default:"" }}</div>
                 </td>
                 <td class="text-center">{{ item.item.hsn_sac }}</td>
                 <td class="text-center">{{ item.quantity }} Nos</td>
@@ -246,6 +243,21 @@
                 <td class="text-end">{{ item.taxable_value|floatformat:2 }}</td>
             </tr>
             {% endfor %}
+
+            {% if invoice.transportcharges and invoice.transportcharges.charges > 0 %}
+            <tr>
+                <td class="text-center">{{ invoice.invoiceitem_set.count|add:1 }}</td>
+                <td>
+                    <div class="text-bold">Transport Charges</div>
+                    <div class="small-text">{{ invoice.transportcharges.description|default:"" }}</div>
+                </td>
+                <td class="text-center">9967</td>
+                <td class="text-center">1 Nos</td>
+                <td class="text-end">{{ invoice.transportcharges.charges }}</td>
+                <td class="text-center">Nos</td>
+                <td class="text-end">{{ invoice.transportcharges.charges }}</td>
+            </tr>
+            {% endif %}
 
             <tr>
                 <td></td>

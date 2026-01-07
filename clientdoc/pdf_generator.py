@@ -8,6 +8,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import os
 from io import BytesIO
+from decimal import Decimal
 
 # Register Font for INR Symbol if available
 # User requested fallback to Rs. if issues persist.
@@ -181,8 +182,6 @@ def generate_invoice_pdf(invoice, company_input):
     inv_no_str = ""
     if invoice.tally_invoice_number:
         inv_no_str += f"Tally Inv: {invoice.tally_invoice_number}<br/>"
-    if invoice.app_invoice_number:
-        inv_no_str += f"App Inv: {invoice.app_invoice_number}"
     
     right_data = [
         [Paragraph("<b>Invoice No.</b>", style_small), Paragraph(f"<b>{inv_no_str}</b>", style_bold), Paragraph("<b>Dated</b>", style_small), Paragraph(f"<b>{clean_date(invoice.date)}</b>", style_bold)],
@@ -223,7 +222,7 @@ def generate_invoice_pdf(invoice, company_input):
         total_qty += item.quantity
         item_data.append([
             str(idx),
-            Paragraph(f"<b>{item.item.name}</b><br/>{item.item.description or ''}", style_normal),
+            Paragraph(f"<b>{item.item.name}</b><br/>{item.description or item.item.description or ''}", style_normal),
             item.item.hsn_sac,
             f"{item.quantity} Nos",
             f"Rs. {item.price}", # Snapshot price
@@ -244,6 +243,25 @@ def generate_invoice_pdf(invoice, company_input):
     total_cgst = sum(i.quantity * i.price * (i.gst_rate / 2) for i in invoice.invoiceitem_set.all())
     total_sgst = sum(i.quantity * i.price * (i.gst_rate / 2) for i in invoice.invoiceitem_set.all())
     
+    # Transport Charges Injection
+    if hasattr(invoice, 'transportcharges') and invoice.transportcharges and invoice.transportcharges.charges > 0:
+        trp = invoice.transportcharges
+        trp_val = trp.charges
+        item_data.append([
+            str(len(invoice.invoiceitem_set.all()) + 1),
+            Paragraph(f"<b>Transport Charges</b><br/>{trp.description or ''}", style_normal),
+            '9967',
+            "1",
+            f"Rs. {trp_val}",
+            "",
+            f"Rs. {trp_val}"
+        ])
+        
+        # Add to Tax Calculation
+        total_cgst += trp_val * Decimal('0.09') # 9%
+        total_sgst += trp_val * Decimal('0.09') # 9%
+        taxable_value += trp_val
+        
     # We display the TOTAL CGST/SGST in the item table now, instead of per rate, 
     # because the detailed breakdown is in the Tax Analysis Matrix below.
     item_data.append(['', Paragraph(f"<b>Output CGST (Total)</b>", style_normal), '', '', '', '', f"Rs. {total_cgst:.2f}"])
@@ -286,6 +304,11 @@ def generate_invoice_pdf(invoice, company_input):
         # Key by HSN AND Rate to separate different tax rates for same HSN (rare but possible)
         key = (h, rate)
         hsn_map[key] = hsn_map.get(key, 0) + val
+        
+    # Add Transport to HSN Map
+    if hasattr(invoice, 'transportcharges') and invoice.transportcharges and invoice.transportcharges.charges > 0:
+        k = ('9967', Decimal('0.18'))
+        hsn_map[k] = hsn_map.get(k, 0) + invoice.transportcharges.charges
         
     total_tax_amt = 0
     for (hsn, rate), val in hsn_map.items():

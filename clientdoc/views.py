@@ -743,11 +743,28 @@ def finalize_invoice_pdf(request, invoice_id):
         try:
             for file_type in file_order:
                 if file_type == 'invoice':
-                    invoice.calculate_total()
-                    merger.append(generate_invoice_pdf(invoice, company_profile))
+                    # Check for Uploaded Custom Invoice first
+                    if confirmation.uploaded_invoice:
+                        try:
+                            PdfReader(confirmation.uploaded_invoice.path)
+                            merger.append(confirmation.uploaded_invoice.path)
+                        except Exception:
+                            # Fallback if corrupt? Or just fail. Fallback to generate.
+                            invoice.calculate_total()
+                            merger.append(generate_invoice_pdf(invoice, company_profile))
+                    else:
+                        invoice.calculate_total()
+                        merger.append(generate_invoice_pdf(invoice, company_profile))
                 
-                elif file_type == 'dc' and hasattr(invoice, 'deliverychallan'):
-                     merger.append(generate_dc_pdf(invoice, invoice.deliverychallan, company_profile))
+                elif file_type == 'dc':
+                    if confirmation.uploaded_dc:
+                        try:
+                            PdfReader(confirmation.uploaded_dc.path)
+                            merger.append(confirmation.uploaded_dc.path)
+                        except Exception:
+                             pass
+                    elif hasattr(invoice, 'deliverychallan'):
+                         merger.append(generate_dc_pdf(invoice, invoice.deliverychallan, company_profile))
                 
                 elif file_type == 'transport' and hasattr(invoice, 'transportcharges'):
                      merger.append(generate_transport_pdf(invoice, invoice.transportcharges, company_profile))
@@ -766,9 +783,7 @@ def finalize_invoice_pdf(request, invoice_id):
                     except Exception:
                         pass
 
-            # Always append images at the end ?? Or should they be in the order list?
-            # User requirement: "all files... creating the PDF... selection... drag up and down".
-            # Images are a collection of pages. Usually best at end.
+            # Always append images at the end
             images_pdf_buffer = generate_packed_images_pdf(confirmation)
             if images_pdf_buffer:
                 merger.append(images_pdf_buffer)
@@ -779,7 +794,7 @@ def finalize_invoice_pdf(request, invoice_id):
             output.seek(0)
             
             # Save logic ...
-            filename_suffix = invoice.tally_invoice_number or invoice.id
+            filename_suffix = invoice.tally_invoice_number or invoice.app_invoice_number or str(invoice.id)
             filename = f"confirmation_invoice_{filename_suffix}.pdf"
             
             # Preview vs Save
@@ -877,17 +892,24 @@ def download_sample_excel(request):
         
     else: # Invoice
         headers = [
-            "Buyer Name", "Location Name", "Item Name", "Quantity", "Generate Invoice (Yes/No)",
-            "Generate PDF (Yes/No)", "App Invoice No. (For Update)",
-            "Tally Invoice No.", 
+            'Buyer Name', 'Location Name', 'Item Name', 'Item Description', 'Quantity', 'Unit Rate', 
+            'SGST', 'CGST', 'IGST', 'Transport Charges', 'Total Amount', 
+            'Generate Invoice (Yes/No)', 'Generate PDF (Yes/No)', 
+            'Tally Invoice No. (Identifier)', 'Invoce Date', 
             "Buyer's Order No.", "Buyer's Order Date (YYYY-MM-DD)", 
-            "Dispatch Doc No.", "Dispatched Through", "Destination", 
-            "Delivery Note", "Delivery Note Date (YYYY-MM-DD)", 
-            "Mode/Terms of Payment", "Reference No. & Date", "Other References", 
-            "Terms of Delivery", "Remarks",
-            "DC Notes", "Transport Charges", "Transport Description"
+            'Dispatch Doc No.', 'Dispatched Through', 'Destination', 
+            'Delivery Note', 'Delivery Note Date (YYYY-MM-DD)', 
+            'Mode/Terms of Payment', 'Reference No. & Date', 'Other References', 
+            'Terms of Delivery', 'Remarks', 'DC Notes', 'Transport Description', 
+            'Doc-1 Invoice (Path)', 'Doc-2 DC (Path)', 'Doc-3 Buyer Po (Path)', 'Doc 4 Email approal (Path)', 
+            'Doc-images-1', 'Doc-images-2', 'Doc-images-3', 'Doc-images-4', 'Doc-images-5'
         ]
-        widths = [25, 25, 25, 10, 15, 15, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 25, 30, 30, 15, 30]
+        # Widths mostly uniform
+        widths = [25] * len(headers)
+        widths[0] = 30 # Buyer
+        widths[1] = 30 # Location
+        widths[2] = 30 # Item
+        widths[3] = 40 # Description
 
     ws.append(headers)
     
@@ -942,11 +964,19 @@ def download_sample_excel(request):
         
         buyers = list(Buyer.objects.values_list('name', flat=True))
         locations = list(StoreLocation.objects.values_list('name', flat=True))
-        items = list(Item.objects.values_list('name', flat=True))
+        
+        # Item Data for Auto-Fill (Name, Price, GST)
+        items_qs = Item.objects.all().values_list('name', 'price', 'gst_rate')
+        items = list(items_qs) # List of tuples
         
         for i, b in enumerate(buyers, 1): data_ws.cell(row=i, column=1, value=b)
         for i, l in enumerate(locations, 1): data_ws.cell(row=i, column=2, value=l)
-        for i, it in enumerate(items, 1): data_ws.cell(row=i, column=3, value=it)
+        
+        # Items in Cols 3, 4, 5 (C, D, E) (Reference Sheet)
+        for i, (name, price, gst) in enumerate(items, 1): 
+            data_ws.cell(row=i, column=3, value=name)
+            data_ws.cell(row=i, column=4, value=price)
+            data_ws.cell(row=i, column=5, value=gst)
 
         def add_val(col, valid_range):
              dv = DataValidation(type="list", formula1=valid_range, allow_blank=True)
@@ -957,17 +987,32 @@ def download_sample_excel(request):
         if locations: add_val('B', f"'Reference Data'!$B$1:$B${len(locations)}")
         if items: add_val('C', f"'Reference Data'!$C$1:$C${len(items)}")
         
+        # VLOOKUP Formulas
+        # Item Name is C. Description is D (User fills). Quantity is E. Unit Rate is F.
+        # We want Unit Rate (F) to auto-fill from Reference Data D (Price) based on C (Item Name).
+        # Reference Data: C=Name, D=Price, E=GST
+        
+        nrows = 500
+        for r in range(2, nrows + 1):
+             # Price VLOOKUP
+             ws[f'F{r}'] = f"=IFERROR(VLOOKUP(C{r}, 'Reference Data'!$C$1:$E${len(items)+1}, 2, FALSE), \"\")"
+             
+        # Yes/No Dropdowns for L and M (Indices 11, 12)
+        # 0=A, 1=B, 2=C, 3=D, 4=E, 5=F, 6=G, 7=H, 8=I, 9=J, 10=K
+        # 11 = L (Gen Invoice)
+        # 12 = M (Gen PDF)
+        
         dv_yn = DataValidation(type="list", formula1='"Yes,No"', allow_blank=False)
         ws.add_data_validation(dv_yn)
-        dv_yn.add("E2:E500")
+        dv_yn.add("L2:L500")
         ws.add_data_validation(dv_yn) 
-        dv_yn.add("F2:F500")
+        dv_yn.add("M2:M500")
         
         # Defaults
-        ws['E2'] = "Yes"
-        ws['F2'] = "Yes" # Default PDF to Yes as requested
-        ws['P2'] = "30 Days"
-        ws['R2'] = "EMAIL Approval"
+        ws['L2'] = "Yes"
+        ws['M2'] = "Yes" 
+        ws['W2'] = "30 Days" # Mode/Terms (Shifted: Old was V(21). Now 22(W))
+        ws['Y2'] = "EMAIL Approval" # Other Ref (Old X(23). Now 24(Y))
     
     # Timestamped Filename
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -1034,9 +1079,9 @@ def process_item_upload(record):
         obj, created = Item.objects.update_or_create(name=name, defaults=defaults)
         log.append(f"Row {idx}: {'Created' if created else 'Updated'} Item '{name}'")
         
-    record.log += "\n".join(log)
-    record.status = 'Processed'
-    record.save()
+        record.log += "\n".join(log)
+        record.status = 'Processed'
+        record.save()
 
 def process_location_upload(record):
     ws = openpyxl.load_workbook(record.file.path, data_only=True).active
@@ -1060,7 +1105,7 @@ def process_location_upload(record):
     record.save()
 
 def process_invoice_upload(upload_record):
-    """Parses Excel with PDF generation and Update support."""
+    """Parses Excel with support for Multiple Items per Invoice using Grouping - Updated Mapping & De-duplications"""
     file_path = upload_record.file.path
     wb = openpyxl.load_workbook(file_path, data_only=True)
     ws = wb.active
@@ -1071,212 +1116,303 @@ def process_invoice_upload(upload_record):
     error_count = 0
     
     from datetime import datetime
+    from decimal import Decimal
+    import uuid
+    from django.core.files import File
+    import os
     
     def parse_date(date_val):
         if not date_val: return None
         if isinstance(date_val, datetime): return date_val
-        try:
-            return datetime.strptime(str(date_val).strip(), '%Y-%m-%d')
-        except ValueError:
-            return None 
+        try: return datetime.strptime(str(date_val).strip(), '%Y-%m-%d')
+        except ValueError: return None 
 
+    # --- 1. READ AND GROUP DATA ---
+    grouped_rows = {} 
+    
     for index, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row or not any(row): continue
         
-        def get_col(idx):
-            return row[idx] if idx < len(row) else None
-            
-        buyer_name = get_col(0)
+        def get_col(idx): return row[idx] if idx < len(row) else None
+        
+        # Mappings Updated (Inserted Description @ 3)
+        # 0: Buyer, 1: Location, 2: Item, 3: DESC (NEW)
+        # 4: Qty, 5: Unit Rate, 6: SGST, 7: CGST, 8: IGST, 9: Trans Charges, 10: Total
+        # 11: Gen Inv, 12: Gen PDF
+        # 13: Tally Inv
+        # 14: Inv Date
+        
+        gen_invoice = get_col(11)
+        if not gen_invoice or str(gen_invoice).strip().lower() != 'yes':
+             log.append(f"Row {index}: Skipped (Generate != Yes)")
+             continue
+
         location_name = get_col(1)
         item_name = get_col(2)
-        qty = get_col(3)
-        gen_invoice = get_col(4)
+        qty = get_col(4)
         
-        # New Cols
-        gen_pdf = get_col(5)
-        app_inv_no = get_col(6)
-        
-        # Header Fields (Shifted +2)
-        tally_no = get_col(7)
-        buyer_ord_no = get_col(8)
-        buyer_ord_date = parse_date(get_col(9))
-        disp_doc_no = get_col(10)
-        disp_through = get_col(11)
-        dest = get_col(12)
-        del_note = get_col(13)
-        del_note_date = parse_date(get_col(14))
-        pay_terms = get_col(15) or "30 Days"
-        ref_no = get_col(16)
-        other_ref = get_col(17) or "EMAIL Approval"
-        terms_del = get_col(18)
-        remark = get_col(19)
-        
-        # DC & Transport
-        dc_notes = get_col(20)
-        trans_charges = get_col(21)
-        trans_desc = get_col(22)
-
-        # 1. Check Gen Invoice Flag
-        if not gen_invoice or str(gen_invoice).strip().lower() != 'yes':
-            log.append(f"Row {index}: Skipped (Generate = No)")
-            continue
-            
-        # 2. Basic Validation
         if not (location_name and item_name and qty):
-            log.append(f"Row {index}: Failed - Missing Location, Item or Qty")
-            error_count += 1
-            continue
+             log.append(f"Row {index}: Skipped (Missing essential Item/Location data)")
+             error_count += 1
+             continue
+             
+        tally_no = str(get_col(13)).strip() if get_col(13) else None
+        
+        if tally_no:
+            key = f"TALLY::{tally_no}"
+        else:
+            key = f"UNIQUE::{uuid.uuid4()}" 
             
+        if key not in grouped_rows:
+            grouped_rows[key] = []
+        
+        row_data = {
+            'index': index,
+            'buyer_name': get_col(0),
+            'location_name': location_name,
+            'item_name': item_name,
+            'item_desc': get_col(3), # New Description
+            'qty': qty,
+            'unit_rate': get_col(5),
+            'trans_charges': get_col(9),
+            'gen_pdf': get_col(12),
+            'tally_no': tally_no,
+            'inv_date': parse_date(get_col(14)),
+            'buyer_ord_no': get_col(15),
+            'buyer_ord_date': parse_date(get_col(16)),
+            'disp_doc_no': get_col(17),
+            'disp_through': get_col(18),
+            'dest': get_col(19),
+            'del_note': get_col(20),
+            'del_note_date': parse_date(get_col(21)),
+            'pay_terms': get_col(22) or "30 Days",
+            'ref_no': get_col(23),
+            'other_ref': get_col(24) or "EMAIL Approval",
+            'terms_del': get_col(25),
+            'remark': get_col(26),
+            'dc_notes': get_col(27),
+            'trans_desc': get_col(28),
+            # File Paths
+            'doc_inv': get_col(29),
+            'doc_dc': get_col(30),
+            'doc_po': get_col(31),
+            'doc_email': get_col(32),
+            'doc_img_1': get_col(33),
+            'doc_img_2': get_col(34),
+            'doc_img_3': get_col(35),
+            'doc_img_4': get_col(36),
+            'doc_img_5': get_col(37),
+        }
+        grouped_rows[key].append(row_data)
+
+    # --- 2. PROCESS GROUPS ---
+    for key, rows in grouped_rows.items():
+        first_row = rows[0]
+        row_indices = [str(r['index']) for r in rows]
+        indices_str = ", ".join(row_indices)
+        
         try:
             with transaction.atomic():
-                # 3. Resolve FKs
-                loc_obj = StoreLocation.objects.filter(name__iexact=str(location_name).strip()).first()
+                loc_obj = StoreLocation.objects.filter(name__iexact=str(first_row['location_name']).strip()).first()
                 if not loc_obj:
-                    log.append(f"Row {index}: Failed - Location '{location_name}' not found")
+                    log.append(f"Rows {indices_str}: Failed - Location '{first_row['location_name']}' not found")
                     error_count += 1
                     continue
                 
                 buyer_obj = None
-                if buyer_name:
-                    buyer_obj = Buyer.objects.filter(name__iexact=str(buyer_name).strip()).first()
+                if first_row['buyer_name']:
+                    buyer_obj = Buyer.objects.filter(name__iexact=str(first_row['buyer_name']).strip()).first()
                 
-                item_obj = Item.objects.filter(name__iexact=str(item_name).strip()).first()
-                if not item_obj:
-                     log.append(f"Row {index}: Failed - Item '{item_name}' not found")
-                     error_count += 1
-                     continue
-
-                # 4. DETERMINE UPDATE OR CREATE
                 invoice = None
                 is_update = False
                 
-                if app_inv_no and str(app_inv_no).strip():
-                    valid_id = str(app_inv_no).strip()
-                    invoice = SalesInvoice.objects.filter(app_invoice_number__iexact=valid_id).first()
-                    if invoice:
-                        is_update = True
+                if first_row['tally_no']:
+                     invoice = SalesInvoice.objects.filter(tally_invoice_number__iexact=first_row['tally_no']).first()
+                     if invoice: is_update = True
                 
-                # Header Data Dict
                 header_data = {
                     'buyer': buyer_obj,
                     'location': loc_obj,
-                    'tally_invoice_number': tally_no,
-                    'buyers_order_no': buyer_ord_no,
-                    'buyers_order_date': buyer_ord_date or datetime.now(),
-                    'dispatch_doc_no': disp_doc_no,
-                    'dispatched_through': disp_through,
-                    'destination': dest,
-                    'delivery_note': del_note,
-                    'delivery_note_date': del_note_date or datetime.now(),
-                    'mode_terms_payment': pay_terms,
-                    'reference_no_date': ref_no,
-                    'other_references': other_ref,
-                    'terms_of_delivery': terms_del,
-                    'remark': remark,
+                    'tally_invoice_number': first_row['tally_no'],
+                    'buyers_order_no': first_row['buyer_ord_no'],
+                    'buyers_order_date': first_row['buyer_ord_date'] or datetime.now(),
+                    'dispatch_doc_no': first_row['disp_doc_no'],
+                    'dispatched_through': first_row['disp_through'],
+                    'destination': first_row['dest'],
+                    'delivery_note': first_row['del_note'],
+                    'delivery_note_date': first_row['del_note_date'] or datetime.now(),
+                    'mode_terms_payment': first_row['pay_terms'],
+                    'reference_no_date': first_row['ref_no'],
+                    'other_references': first_row['other_ref'],
+                    'terms_of_delivery': first_row['terms_del'],
+                    'remark': first_row['remark'],
                 }
+                
+                if first_row['inv_date']: header_data['date'] = first_row['inv_date']
 
                 if is_update and invoice:
-                    # Update fields
-                    for key, val in header_data.items():
-                        if val is not None: # Only update if value provided? Or overwrite? 
-                            # Overwrite is safer for sync
-                            setattr(invoice, key, val)
-                    invoice.save()
-                    log_entry_prefix = f"Row {index}: Updated Invoice {invoice.app_invoice_number}"
-                    updated_count += 1
+                     for k, v in header_data.items():
+                         if v is not None: setattr(invoice, k, v)
+                     invoice.save()
+                     log.append(f"Rows {indices_str}: Updated Invoice {invoice.app_invoice_number or invoice.id}")
+                     updated_count += 1
                 else:
-                    # Create New
-                    header_data['date'] = datetime.now()
+                    if 'date' not in header_data: header_data['date'] = datetime.now()
                     header_data['status'] = 'DRF'
                     invoice = SalesInvoice.objects.create(**header_data)
-                    log_entry_prefix = f"Row {index}: Created Invoice #{invoice.id}"
+                    log.append(f"Rows {indices_str}: Created Invoice #{invoice.id}")
                     created_count += 1
+                    
+                # --- PROCESS ITEMS (Iterate ALL rows in group) ---
+                for r in rows:
+                    item_obj = Item.objects.filter(name__iexact=str(r['item_name']).strip()).first()
+                    if not item_obj:
+                         log.append(f"Row {r['index']}: Warning - Item '{r['item_name']}' not found. Skipped.")
+                         continue
+                    try: q = int(r['qty'])
+                    except: q = 1
+                    
+                    price = item_obj.price
+                    if r['unit_rate']:
+                        try: price = Decimal(str(r['unit_rate']).strip())
+                        except: pass
+                    
+                    # Prevent Duplicates and Fix "Returned more than one" error
+                    # If multiple items exist (from previous bad uploads), delete them first.
+                    existing_dupes = InvoiceItem.objects.filter(invoice=invoice, item=item_obj)
+                    if existing_dupes.count() > 1:
+                        existing_dupes.delete()
+
+                    # Update or Create based on Item
+                    InvoiceItem.objects.update_or_create(
+                        invoice=invoice,
+                        item=item_obj,
+                        defaults={
+                            'quantity': q,
+                            'price': price,
+                            'gst_rate': item_obj.gst_rate,
+                            'description': r['item_desc'] 
+                        }
+                    )
                 
-                # 5. Add Item (Append)
-                InvoiceItem.objects.create(
-                    invoice=invoice,
-                    item=item_obj,
-                    quantity=int(qty),
-                    price=item_obj.price,
-                )
-                
-                # 6. Auto-Create/Update DC
-                if dc_notes:
+                if first_row['dc_notes']:
                     dc, _ = DeliveryChallan.objects.get_or_create(invoice=invoice)
-                    dc.notes = dc_notes
+                    dc.notes = first_row['dc_notes']
                     dc.save()
                     if invoice.status == 'DRF': invoice.status = 'DC'
+                    
+                if first_row['trans_charges']:
+                     try:
+                         amt = Decimal(str(first_row['trans_charges']).strip()) 
+                         trp, _ = TransportCharges.objects.get_or_create(invoice=invoice)
+                         trp.charges = amt
+                         trp.description = first_row['trans_desc']
+                         trp.save()
+                         if invoice.status in ['DRF', 'DC']: invoice.status = 'TRP'
+                     except Exception as e:
+                         log.append(f"Row {first_row['index']}: Warning - Invalid Transport Charge ({e})")
                 
-                # 7. Auto-Create/Update Transport
-                if trans_charges:
-                    try:
-                        amt = float(trans_charges)
-                        trp, _ = TransportCharges.objects.get_or_create(invoice=invoice)
-                        trp.charges = amt
-                        trp.description = trans_desc
-                        trp.save()
-                        if invoice.status in ['DRF', 'DC']: invoice.status = 'TRP'
-                    except ValueError:
-                        log.append(f"{log_entry_prefix} - Warning: Invalid Transport Charge")
-
                 invoice.save()
                 invoice.calculate_total()
                 
-                # 8. GENERATE PDF?
-                pdf_status = ""
-                if gen_pdf and str(gen_pdf).strip().lower() == 'yes':
-                    # Only gen if status allows (must have DC/TRP technically, but we can force)
+                # --- FILE UPLOADS ---
+                conf, _ = ConfirmationDocument.objects.get_or_create(invoice=invoice)
+                
+                def save_file_from_path(path_val, target_field):
+                    if path_val and os.path.exists(path_val):
+                         try:
+                             with open(path_val, 'rb') as f:
+                                 fname = os.path.basename(path_val)
+                                 target_field.save(fname, File(f), save=True)
+                         except Exception as fe:
+                             log.append(f" Failed to load file {path_val}: {fe}")
+                
+                save_file_from_path(first_row['doc_po'], conf.po_file)
+                save_file_from_path(first_row['doc_email'], conf.approval_email_file)
+                save_file_from_path(first_row['doc_inv'], conf.uploaded_invoice)
+                save_file_from_path(first_row['doc_dc'], conf.uploaded_dc)
+                
+                # --- PACKED IMAGES (Iterate 5 slots) ---
+                img_slots = [first_row[f'doc_img_{i}'] for i in range(1, 6)]
+                for img_path in img_slots:
+                    if img_path and os.path.exists(img_path):
+                        try:
+                            with open(img_path, 'rb') as f:
+                                pi = PackedImage(confirmation=conf)
+                                pi.image.save(os.path.basename(img_path), File(f), save=True)
+                        except Exception as ie:
+                           log.append(f" Failed to load image {img_path}: {ie}")
+
+                # --- PDF GENERATION ---
+                should_gen_pdf = any(str(r['gen_pdf']).strip().lower() == 'yes' for r in rows if r['gen_pdf'])
+                if should_gen_pdf:
                     try:
-                        # Ensure confirmation doc exists
-                        conf, _ = ConfirmationDocument.objects.get_or_create(invoice=invoice)
                         company_profile = OurCompanyProfile.objects.first()
-                        
                         merger = PdfMerger()
                         
-                        # 1. Invoice
-                        invoice.calculate_total() 
-                        merger.append(generate_invoice_pdf(invoice, company_profile))
-                        
-                        # 2. DC
-                        if hasattr(invoice, 'deliverychallan'):
+                        # Invoice: Use uploaded if present, else generate
+                        if conf.uploaded_invoice:
+                            try:
+                                PdfReader(conf.uploaded_invoice.path)
+                                merger.append(conf.uploaded_invoice.path)
+                            except: pass # fallback or error
+                        else:
+                            invoice.calculate_total() 
+                            merger.append(generate_invoice_pdf(invoice, company_profile))
+                            
+                        # DC: Use uploaded if present, else generate if DC exists
+                        if conf.uploaded_dc:
+                            try:
+                                PdfReader(conf.uploaded_dc.path)
+                                merger.append(conf.uploaded_dc.path)
+                            except: pass
+                        elif hasattr(invoice, 'deliverychallan'):
                             merger.append(generate_dc_pdf(invoice, invoice.deliverychallan, company_profile))
                             
-                        # 3. Transport
                         if hasattr(invoice, 'transportcharges'):
                             merger.append(generate_transport_pdf(invoice, invoice.transportcharges, company_profile))
-                            
-                        # Output
+                        
+                        # Append PO/Email if they were just uploaded (or existed)
+                        # Actually logic in finalize_pdf usually does this. Here we replicate simple bundle for bulk.
+                        if conf.po_file:
+                             try: merger.append(conf.po_file.path)
+                             except: pass
+                        if conf.approval_email_file:
+                             try: merger.append(conf.approval_email_file.path)
+                             except: pass
+
+                        # Images
+                        # generate_packed_images_pdf is defined in this file
+                        images_pdf_buffer = generate_packed_images_pdf(conf)
+                        if images_pdf_buffer:
+                            merger.append(images_pdf_buffer)
+
                         output = BytesIO()
                         merger.write(output)
                         merger.close()
                         output.seek(0)
                         
-                        # Save
-                        filename_suffix = invoice.tally_invoice_number or invoice.app_invoice_number or str(invoice.id)
-                        filename = f"confirmation_invoice_{filename_suffix}.pdf"
+                        suffix = invoice.tally_invoice_number or invoice.app_invoice_number or str(invoice.id)
+                        filename = f"confirmation_invoice_{suffix}.pdf"
                         
-                        # Django File Save
                         from django.core.files.base import ContentFile
                         conf.combined_pdf.save(filename, ContentFile(output.getvalue()), save=True)
-                        
                         invoice.status = 'FIN'
                         invoice.save()
-                        pdf_status = " + PDF Generated"
-                        
+                        log.append(f" Invoice #{invoice.id}: PDF Generated (Bundled)")
                     except Exception as pdf_err:
-                        pdf_status = f" + PDF Failed: {str(pdf_err)}"
                         logger.error(f"Bulk PDF Error: {pdf_err}")
-
-                log.append(f"{log_entry_prefix}{pdf_status}")
+                        log.append(f" Invoice #{invoice.id}: PDF Failed ({str(pdf_err)})")
 
         except Exception as e:
-            log.append(f"Row {index}: Error - {str(e)}")
+            log.append(f"Rows {indices_str}: Group Error - {str(e)}")
             error_count += 1
-            
-    upload_record.log = "\\n".join(log)
+            import traceback
+            logger.error(traceback.format_exc())
+
+    upload_record.log = "\n".join(log)
     upload_record.status = 'Processed'
     upload_record.save()
-
     
     return redirect('clientdoc:dashboard')
 
@@ -1363,6 +1499,9 @@ def print_invoice(request, invoice_id):
     # Re-sum taxable for display if needed, or rely on grand total - tax? 
     # Better to sum line items for the "Taxable Value" column/row in template.
     taxable_val = sum(item.taxable_value for item in invoice.invoiceitem_set.all())
+    
+    if hasattr(invoice, 'transportcharges') and invoice.transportcharges and invoice.transportcharges.charges > 0:
+        taxable_val += invoice.transportcharges.charges
 
     return render(request, 'clientdoc/invoice_print_template.html', {
         'invoice': invoice,

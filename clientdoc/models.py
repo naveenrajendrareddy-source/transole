@@ -283,6 +283,27 @@ class SalesInvoice(SoftDeleteModel):
             grand_total += taxable + tax_amount
             total_tax += tax_amount
 
+        # --- Add Transport Charges if Any ---
+        if hasattr(self, 'transportcharges'):
+            trp = self.transportcharges
+            if trp and trp.charges > 0:
+                # Assuming 18% GST on Transport for now (Standard Service Rate)
+                # Or check if specific config exists. User said "along with gst".
+                trp_taxable = trp.charges
+                trp_gst_rate = Decimal('0.18') 
+                
+                trp_tax_amt = (trp_taxable * trp_gst_rate).quantize(Decimal('0.01'))
+                
+                if is_inter_state:
+                    total_igst += trp_tax_amt
+                else:
+                    half_tax = (trp_tax_amt / Decimal('2.00')).quantize(Decimal('0.01'))
+                    total_cgst += half_tax
+                    total_sgst += half_tax
+                
+                grand_total += trp_taxable + trp_tax_amt
+                total_tax += trp_tax_amt
+
         self.cgst_total = total_cgst
         self.sgst_total = total_sgst
         self.igst_total = total_igst
@@ -347,6 +368,7 @@ class InvoiceItem(models.Model):
     
     # Snapshot fields for historical accuracy
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    description = models.TextField(blank=True, null=True, verbose_name="Item Description (Snapshot)")
     quantity_shipped = models.IntegerField(default=1)
     quantity_billed = models.IntegerField(default=1)
     
@@ -432,6 +454,10 @@ class ConfirmationDocument(SoftDeleteModel):
     # Uploaded Documents
     po_file = models.FileField(upload_to='confirmation_docs/po/', blank=True, null=True, verbose_name="PO Copy")
     approval_email_file = models.FileField(upload_to='confirmation_docs/email/', blank=True, null=True, verbose_name="Approval Email PDF")
+    
+    # Custom Uploads (Overrides generated ones if present)
+    uploaded_invoice = models.FileField(upload_to='confirmation_docs/inv/', blank=True, null=True, verbose_name="Custom Invoice PDF")
+    uploaded_dc = models.FileField(upload_to='confirmation_docs/dc/', blank=True, null=True, verbose_name="Custom DC PDF")
 
     # Final Output
     combined_pdf = models.FileField(upload_to='confirmations/', blank=True, null=True)
