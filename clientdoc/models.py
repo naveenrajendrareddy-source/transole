@@ -325,7 +325,7 @@ class SalesInvoice(SoftDeleteModel):
                 try:
                     with transaction.atomic():
                         # Find the highest existing app_invoice_number sequence
-                        last_invoice = SalesInvoice.objects.all().order_by('-app_invoice_number').only('app_invoice_number').first()
+                        last_invoice = SalesInvoice.all_objects.all().order_by('-app_invoice_number').only('app_invoice_number').first()
                         
                         new_seq = 1
                         if last_invoice and last_invoice.app_invoice_number:

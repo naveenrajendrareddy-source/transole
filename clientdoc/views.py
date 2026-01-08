@@ -49,13 +49,29 @@ def generate_packed_images_pdf(confirmation):
     c.drawString(margin, y, "Packed Goods Images")
     y -= 40
     
+    # Track unique image paths to prevent duplicates
+    seen_images = set()
+    
     for image_obj in images:
+        # Skip duplicate images based on file path
+        try:
+            img_path = image_obj.image.path
+            
+            # Check if we've already processed this image
+            if img_path in seen_images:
+                continue
+            
+            seen_images.add(img_path)
+            
+        except Exception:
+            # If path access fails, skip this image
+            continue
+        
         if y < margin + img_height + spacing:
             c.showPage()
             y = height - margin - 20 
             
         try:
-            img_path = image_obj.image.path
             img = ImageReader(img_path) 
             
             aspect = img.getSize()[1] / img.getSize()[0]
@@ -869,6 +885,7 @@ def download_sample_excel(request):
     """Generates a sample excel file based on type with formatting, optionally with data."""
     import datetime
     from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.comments import Comment
     
     upload_type = request.GET.get('type', 'invoice')
     do_export = request.GET.get('export') == 'true'
@@ -926,6 +943,26 @@ def download_sample_excel(request):
     # Blue First Column Header
     ws['A1'].fill = blue_fill
     
+    # Add Comments for Guidance (Invoice Only)
+    if upload_type == 'invoice':
+        comments_map = {
+            'A1': "Select Buyer from dropdown or ensure exact name match.",
+            'B1': "Select Location (Ship To) from dropdown.",
+            'C1': "Select Item. Description/Price auto-fill if left blank.",
+            'J1': "Fill amount to auto-generate Transport Bill.",
+            'L1': "Must be 'Yes' to process row.",
+            'M1': "Must be 'Yes' to bundle PDFs.",
+            'N1': "Unique ID. Leave blank to auto-generate (Tsol-XXXXX). Use same ID on multiple rows to group items.",
+            'U1': "If filled, Delivery Challan (DC) is auto-created.",
+            'V1': "If filled, Delivery Challan (DC) is auto-created.",
+            'AB1': "Notes for DC. If filled, DC is auto-created.",
+            'AD1': "Absolute file path (e.g. C:\\Docs\\Inv.pdf). Overrides auto-gen invoice.",
+            'AG1': "Absolute file path for Approval Email PDF."
+        }
+        for cell_coord, note in comments_map.items():
+            if cell_coord in ws:
+                ws[cell_coord].comment = Comment(note, "System")
+
     # Set Widths
     for i, width in enumerate(widths, 1):
         col_letter = openpyxl.utils.get_column_letter(i)
@@ -978,14 +1015,29 @@ def download_sample_excel(request):
             data_ws.cell(row=i, column=4, value=price)
             data_ws.cell(row=i, column=5, value=gst)
 
-        def add_val(col, valid_range):
-             dv = DataValidation(type="list", formula1=valid_range, allow_blank=True)
+        # Named Ranges for Robust Dropdowns
+        from openpyxl.workbook.defined_name import DefinedName
+        
+        # Helper to safer add named range
+        def create_named_range(name, sheet_title, range_ref):
+            d = DefinedName(name, attr_text=f"'{sheet_title}'!{range_ref}")
+            wb.defined_names.add(d)
+
+        if buyers:
+            create_named_range("BuyerList", "Reference Data", f"$A$1:$A${len(buyers)}")
+        if locations:
+            create_named_range("LocList", "Reference Data", f"$B$1:$B${len(locations)}")
+        if items:
+            create_named_range("ItemList", "Reference Data", f"$C$1:$C${len(items)}")
+        
+        def add_val(col, valid_formula):
+             dv = DataValidation(type="list", formula1=valid_formula, allow_blank=True)
              ws.add_data_validation(dv)
              dv.add(f"{col}2:{col}500")
 
-        if buyers: add_val('A', f"'Reference Data'!$A$1:$A${len(buyers)}")
-        if locations: add_val('B', f"'Reference Data'!$B$1:$B${len(locations)}")
-        if items: add_val('C', f"'Reference Data'!$C$1:$C${len(items)}")
+        if buyers: add_val('A', "=BuyerList")
+        if locations: add_val('B', "=LocList")
+        if items: add_val('C', "=ItemList")
         
         # VLOOKUP Formulas
         # Item Name is C. Description is D (User fills). Quantity is E. Unit Rate is F.
@@ -1295,9 +1347,11 @@ def process_invoice_upload(upload_record):
                         }
                     )
                 
-                if first_row['dc_notes']:
+                # Create DC if Notes OR Delivery Note details are present
+                if first_row['dc_notes'] or first_row['del_note'] or first_row['del_note_date']:
                     dc, _ = DeliveryChallan.objects.get_or_create(invoice=invoice)
-                    dc.notes = first_row['dc_notes']
+                    if first_row['dc_notes']: 
+                        dc.notes = first_row['dc_notes']
                     dc.save()
                     if invoice.status == 'DRF': invoice.status = 'DC'
                     
@@ -1308,24 +1362,34 @@ def process_invoice_upload(upload_record):
                          trp.charges = amt
                          trp.description = first_row['trans_desc']
                          trp.save()
+                         # Force invoice to be aware if needed or just status update
                          if invoice.status in ['DRF', 'DC']: invoice.status = 'TRP'
                      except Exception as e:
                          log.append(f"Row {first_row['index']}: Warning - Invalid Transport Charge ({e})")
                 
                 invoice.save()
-                invoice.calculate_total()
+                
+                # CRITICAL: Calculate total AFTER adding transport charges so Tax Matrix includes them
+                # refresh_from_db isn't strictly needed inside atomic for related objects unless cached, 
+                # but let's be safe for calculate logic.
+                if hasattr(invoice, 'transportcharges'): invoice.transportcharges.refresh_from_db()
+                invoice.calculate_total() 
                 
                 # --- FILE UPLOADS ---
                 conf, _ = ConfirmationDocument.objects.get_or_create(invoice=invoice)
                 
                 def save_file_from_path(path_val, target_field):
-                    if path_val and os.path.exists(path_val):
-                         try:
-                             with open(path_val, 'rb') as f:
-                                 fname = os.path.basename(path_val)
-                                 target_field.save(fname, File(f), save=True)
-                         except Exception as fe:
-                             log.append(f" Failed to load file {path_val}: {fe}")
+                    if path_val:
+                         path_val = str(path_val).strip() # Clean path
+                         if os.path.exists(path_val):
+                             try:
+                                 with open(path_val, 'rb') as f:
+                                     fname = os.path.basename(path_val)
+                                     target_field.save(fname, File(f), save=True)
+                             except Exception as fe:
+                                 log.append(f" Failed to load file {path_val}: {fe}")
+                         else:
+                             log.append(f" File not found: {path_val}")
                 
                 save_file_from_path(first_row['doc_po'], conf.po_file)
                 save_file_from_path(first_row['doc_email'], conf.approval_email_file)
@@ -1335,13 +1399,17 @@ def process_invoice_upload(upload_record):
                 # --- PACKED IMAGES (Iterate 5 slots) ---
                 img_slots = [first_row[f'doc_img_{i}'] for i in range(1, 6)]
                 for img_path in img_slots:
-                    if img_path and os.path.exists(img_path):
-                        try:
-                            with open(img_path, 'rb') as f:
-                                pi = PackedImage(confirmation=conf)
-                                pi.image.save(os.path.basename(img_path), File(f), save=True)
-                        except Exception as ie:
-                           log.append(f" Failed to load image {img_path}: {ie}")
+                    if img_path:
+                        img_path = str(img_path).strip()
+                        if os.path.exists(img_path):
+                            try:
+                                with open(img_path, 'rb') as f:
+                                    pi = PackedImage(confirmation=conf)
+                                    pi.image.save(os.path.basename(img_path), File(f), save=True)
+                            except Exception as ie:
+                               log.append(f" Failed to load image {img_path}: {ie}")
+                        else:
+                            log.append(f" Image not found: {img_path}")
 
                 # --- PDF GENERATION ---
                 should_gen_pdf = any(str(r['gen_pdf']).strip().lower() == 'yes' for r in rows if r['gen_pdf'])
@@ -1350,17 +1418,18 @@ def process_invoice_upload(upload_record):
                         company_profile = OurCompanyProfile.objects.first()
                         merger = PdfMerger()
                         
-                        # Invoice: Use uploaded if present, else generate
+                        # 1. Tax Invoice
                         if conf.uploaded_invoice:
                             try:
                                 PdfReader(conf.uploaded_invoice.path)
                                 merger.append(conf.uploaded_invoice.path)
-                            except: pass # fallback or error
+                            except: pass 
                         else:
-                            invoice.calculate_total() 
+                            # Re-Calculate to be 100% sure before PDF Gen
+                            invoice.calculate_total()
                             merger.append(generate_invoice_pdf(invoice, company_profile))
                             
-                        # DC: Use uploaded if present, else generate if DC exists
+                        # 2. Delivery Note (DC)
                         if conf.uploaded_dc:
                             try:
                                 PdfReader(conf.uploaded_dc.path)
@@ -1369,20 +1438,25 @@ def process_invoice_upload(upload_record):
                         elif hasattr(invoice, 'deliverychallan'):
                             merger.append(generate_dc_pdf(invoice, invoice.deliverychallan, company_profile))
                             
+                        # 3. Transport Charges
                         if hasattr(invoice, 'transportcharges'):
-                            merger.append(generate_transport_pdf(invoice, invoice.transportcharges, company_profile))
+                             # Ensure the relation is accessible
+                             merger.append(generate_transport_pdf(invoice, invoice.transportcharges, company_profile))
                         
-                        # Append PO/Email if they were just uploaded (or existed)
-                        # Actually logic in finalize_pdf usually does this. Here we replicate simple bundle for bulk.
-                        if conf.po_file:
-                             try: merger.append(conf.po_file.path)
-                             except: pass
+                        # 4. Email Approval / Buyer PO
+                        # User requested "Email Approval / Buyer PO". We'll append Email first, then PO if desired, or prioritized.
+                        # Assuming they map to the same conceptual "Approval" step. 
+                        conf.refresh_from_db() 
+                        
                         if conf.approval_email_file:
                              try: merger.append(conf.approval_email_file.path)
                              except: pass
+                             
+                        if conf.po_file:
+                             try: merger.append(conf.po_file.path)
+                             except: pass
 
-                        # Images
-                        # generate_packed_images_pdf is defined in this file
+                        # 5. Images (1-5)
                         images_pdf_buffer = generate_packed_images_pdf(conf)
                         if images_pdf_buffer:
                             merger.append(images_pdf_buffer)

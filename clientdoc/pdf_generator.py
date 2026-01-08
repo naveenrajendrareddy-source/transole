@@ -239,33 +239,34 @@ def generate_invoice_pdf(invoice, company_input):
     bill_details = f"Bill Details: New Ref {clean(invoice.tally_invoice_number or invoice.app_invoice_number)} 30 Days {invoice.total} Dr"
     
     # Calculate totals for summary (simplified for view)
-    # Calculate totals for summary
-    total_cgst = sum(i.quantity * i.price * (i.gst_rate / 2) for i in invoice.invoiceitem_set.all())
-    total_sgst = sum(i.quantity * i.price * (i.gst_rate / 2) for i in invoice.invoiceitem_set.all())
+    # Use stored totals from model which are robust (handle POS and Transport)
+    total_cgst = invoice.cgst_total
+    total_sgst = invoice.sgst_total
+    total_igst = invoice.igst_total
     
-    # Transport Charges Injection
+    # Transport Charges Injection (for Item Display Only)
     if hasattr(invoice, 'transportcharges') and invoice.transportcharges and invoice.transportcharges.charges > 0:
         trp = invoice.transportcharges
         trp_val = trp.charges
         item_data.append([
             str(len(invoice.invoiceitem_set.all()) + 1),
             Paragraph(f"<b>Transport Charges</b><br/>{trp.description or ''}", style_normal),
-            '9967',
+            '997619',
             "1",
             f"Rs. {trp_val}",
             "",
             f"Rs. {trp_val}"
         ])
         
-        # Add to Tax Calculation
-        total_cgst += trp_val * Decimal('0.09') # 9%
-        total_sgst += trp_val * Decimal('0.09') # 9%
-        taxable_value += trp_val
+        taxable_value += trp_val # Add to local taxable sum for check
         
-    # We display the TOTAL CGST/SGST in the item table now, instead of per rate, 
-    # because the detailed breakdown is in the Tax Analysis Matrix below.
-    item_data.append(['', Paragraph(f"<b>Output CGST (Total)</b>", style_normal), '', '', '', '', f"Rs. {total_cgst:.2f}"])
-    item_data.append(['', Paragraph(f"<b>Output SGST (Total)</b>", style_normal), '', '', '', '', f"Rs. {total_sgst:.2f}"])
+    # Tax Summary Rows based on IGST vs CGST/SGST
+    if total_igst > 0:
+         item_data.append(['', Paragraph(f"<b>Output IGST (Total)</b>", style_normal), '', '', '', '', f"Rs. {total_igst:.2f}"])
+    else:
+         item_data.append(['', Paragraph(f"<b>Output CGST (Total)</b>", style_normal), '', '', '', '', f"Rs. {total_cgst:.2f}"])
+         item_data.append(['', Paragraph(f"<b>Output SGST (Total)</b>", style_normal), '', '', '', '', f"Rs. {total_sgst:.2f}"])
+         
     item_data.append(['', Paragraph(f"<br/><b>Bill Details:</b><br/>{bill_details}", style_small), '', '', '', '', ''])
 
     item_data.append(['', 'Total', '', f"{total_qty} Nos", '', '', f"{INR_SYMBOL} {invoice.total}"])
@@ -305,9 +306,10 @@ def generate_invoice_pdf(invoice, company_input):
         key = (h, rate)
         hsn_map[key] = hsn_map.get(key, 0) + val
         
-    # Add Transport to HSN Map
+    # Transport Charges Injection (for Tax Matrix)
+    # Ensure this matches the key expected by the HSN code update
     if hasattr(invoice, 'transportcharges') and invoice.transportcharges and invoice.transportcharges.charges > 0:
-        k = ('9967', Decimal('0.18'))
+        k = ('997619', Decimal('0.18'))
         hsn_map[k] = hsn_map.get(k, 0) + invoice.transportcharges.charges
         
     total_tax_amt = 0
@@ -388,8 +390,11 @@ def generate_dc_pdf(invoice, dc, company_input):
     left_content = [Paragraph(seller_text + consignee_text, style_normal)]
     
     # Right: DC Details
+    # Use delivery_note from invoice (Excel Column U) if available
+    dc_number = invoice.delivery_note if invoice.delivery_note else f"DC-{invoice.tally_invoice_number or invoice.app_invoice_number}"
+    
     dc_data = [
-        [Paragraph("<b>DC No.</b>", style_normal), Paragraph(f"<b>DC-{invoice.tally_invoice_number or invoice.app_invoice_number}</b>", style_bold)],
+        [Paragraph("<b>DC No.</b>", style_normal), Paragraph(f"<b>{dc_number}</b>", style_bold)],
         [Paragraph("<b>Date</b>", style_normal), Paragraph(f"<b>{clean_date(dc.date)}</b>", style_bold)],
         [Paragraph("<b>Ref Invoice No.</b>", style_normal), Paragraph(clean(invoice.tally_invoice_number or invoice.app_invoice_number), style_normal)],
         [Paragraph("<b>Vehicle No.</b>", style_normal), Paragraph(clean(dc.notes), style_normal)],
@@ -526,7 +531,7 @@ def generate_transport_pdf(invoice, transport, company_input):
     style_bold = ParagraphStyle('Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9)
     style_header = ParagraphStyle('Header', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=14, alignment=1)
 
-    elements.append(Paragraph("TRANSPORT BILL", style_header))
+    elements.append(Paragraph("TRANSPORT CHARGES BILL", style_header))
     elements.append(Spacer(1, 5*mm))
     
     # Left: Seller details + Bill To
@@ -547,8 +552,11 @@ def generate_transport_pdf(invoice, transport, company_input):
     left_content = [Paragraph(seller_text + bill_to_text, style_normal)]
     
     # Right: Bill Details
+    # Use TC-TallyInvoiceNumber format
+    tc_number = f"TC-{invoice.tally_invoice_number}" if invoice.tally_invoice_number else f"TC-{invoice.app_invoice_number}"
+    
     trp_data = [
-        [Paragraph("<b>Bill No.</b>", style_normal), Paragraph(f"<b>TRP-{transport.id}</b>", style_bold)],
+        [Paragraph("<b>Bill No.</b>", style_normal), Paragraph(f"<b>{tc_number}</b>", style_bold)],
         [Paragraph("<b>Date</b>", style_normal), Paragraph(f"<b>{clean_date(transport.date)}</b>", style_bold)],
         [Paragraph("<b>Ref Invoice No.</b>", style_normal), Paragraph(clean(invoice.tally_invoice_number or invoice.app_invoice_number), style_normal)],
         [Paragraph("<b>Vehicle/Ref</b>", style_normal), Paragraph(clean(transport.description), style_normal)],
@@ -569,15 +577,33 @@ def generate_transport_pdf(invoice, transport, company_input):
     ]))
     elements.append(main_table)
     
-    # Charges Table
+    # Charges Table with GST
+    charges = transport.charges
+    gst_rate = Decimal('0.18')
+    tax_amt = (charges * gst_rate).quantize(Decimal('0.01'))
+    total_with_tax = charges + tax_amt
+    
+    # Determine split (Simplified: Assuming Intra-state for now strictly 9+9, or check POS?)
+    # ideally we check POS. 
+    comp_state_code = company_input.state_code if company_input else '29'
+    pos_code = invoice.location.state_code if invoice.location else '29'
+    is_igst = (pos_code != comp_state_code)
+    
     t_data = [['Description', 'HSN', 'Amount']]
     t_data.append([
         Paragraph(f"Transport Charges<br/>{transport.description or ''}", style_normal), 
-        '996719', 
-        f"{transport.charges}"
+        '997619', 
+        f"Rs. {charges}"
     ])
     
-    t_data.append(['Total', '', f"{INR_SYMBOL} {transport.charges}"])
+    if is_igst:
+         t_data.append(['Output IGST (18%)', '', f"Rs. {tax_amt}"])
+    else:
+         half_tax = (tax_amt / 2).quantize(Decimal('0.01'))
+         t_data.append(['Output CGST (9%)', '', f"Rs. {half_tax}"])
+         t_data.append(['Output SGST (9%)', '', f"Rs. {half_tax}"])
+    
+    t_data.append(['Total (Inc. GST)', '', f"{INR_SYMBOL} {total_with_tax}"])
     
     t = Table(t_data, colWidths=[120*mm, 30*mm, 30*mm])
     t.setStyle(TableStyle([
@@ -586,7 +612,7 @@ def generate_transport_pdf(invoice, transport, company_input):
         ('ALIGN', (-1,1), (-1,-1), 'RIGHT'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTNAME', (-1,-1), (-1,-1), 'Helvetica-Bold'),
-        ('SPAN', (0,-1), (1,-1)),
+        ('SPAN', (0,-1), (1,-1)), # Span total label
         ('BOTTOMPADDING', (0,0), (-1,-1), 8),
         ('TOPPADDING', (0,0), (-1,-1), 8),
     ]))
