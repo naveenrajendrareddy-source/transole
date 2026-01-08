@@ -402,8 +402,9 @@ class InvoiceItem(models.Model):
 
     @property
     def gross_amount(self):
-        """Returns Quantity Billed * Price"""
-        return (Decimal(self.quantity_billed) * self.price).quantize(Decimal('0.01'))
+        """Returns Quantity * Price"""
+        # Fix: Use quantity explicitly as this is the primary field used in PDF and Views
+        return (Decimal(self.quantity) * self.price).quantize(Decimal('0.01'))
 
     @property
     def discount_amount(self):

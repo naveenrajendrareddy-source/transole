@@ -1341,6 +1341,8 @@ def process_invoice_upload(upload_record):
                         item=item_obj,
                         defaults={
                             'quantity': q,
+                            'quantity_billed': q,
+                            'quantity_shipped': q,
                             'price': price,
                             'gst_rate': item_obj.gst_rate,
                             'description': r['item_desc'] 
@@ -1376,7 +1378,13 @@ def process_invoice_upload(upload_record):
                 invoice.calculate_total() 
                 
                 # --- FILE UPLOADS ---
-                conf, _ = ConfirmationDocument.objects.get_or_create(invoice=invoice)
+                # Fix: Check all_objects to handle soft-deleted records to prevent UNIQUE constraint error
+                conf = ConfirmationDocument.all_objects.filter(invoice=invoice).first()
+                if conf:
+                    if conf.is_deleted:
+                        conf.restore()
+                else:
+                    conf = ConfirmationDocument.objects.create(invoice=invoice)
                 
                 def save_file_from_path(path_val, target_field):
                     if path_val:
